@@ -350,6 +350,19 @@ class SSLMetaArch(nn.Module):
         self.dino_loss.init_weights()
         self.ibot_patch_loss.init_weights()
         self.model_ema.load_state_dict(self.student.state_dict())
+        if self.cfg.student.pretrained_weights:
+            logger.info(
+                "Loading student pretrained weights from %s", self.cfg.student.pretrained_weights
+            )
+            process_group = distributed.get_process_subgroup() if distributed.is_enabled() else None
+            init_fsdp_model_from_checkpoint(
+                self.student,
+                self.cfg.student.pretrained_weights,
+                skip_load_keys=[],
+                keys_not_sharded=["backbone.rope_embed.periods", "qkv.bias_mask"],
+                process_group=process_group,
+            )
+            self.model_ema.load_state_dict(self.student.state_dict())
         if self.has_gram_teacher:
             if self.gram_ckpt is not None:
                 logger.info(f"Loading pretrained weights from {self.gram_ckpt}")
