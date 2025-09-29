@@ -365,22 +365,29 @@ def init_fsdp_model_from_checkpoint(
             world_mesh = DeviceMesh.from_group(process_group, "cuda")
 
     if world_mesh is not None:
+
         distribute_tensor_fn = torch.distributed.tensor.distribute_tensor
         try:
             distribute_params = inspect.signature(distribute_tensor_fn).parameters
         except (TypeError, ValueError):
             distribute_params = {}
+
         distributed_state_dict = {}
         for key, tensor in filtered_state_dict.items():
             if any(not_sharded_key in key for not_sharded_key in keys_not_sharded):
                 distributed_state_dict[key] = tensor
             else:
+
                 kwargs = {}
                 if "src_data_rank" in distribute_params:
                     kwargs["src_data_rank"] = None
                 elif "src_rank" in distribute_params:
                     kwargs["src_rank"] = None
                 distributed_state_dict[key] = distribute_tensor_fn(tensor, world_mesh, **kwargs)
+                distributed_state_dict[key] = torch.distributed.tensor.distribute_tensor(
+                    tensor, world_mesh, src_data_rank=None
+                )
+
         filtered_state_dict = distributed_state_dict
 
     load_msg = model.load_state_dict(filtered_state_dict, strict=False)

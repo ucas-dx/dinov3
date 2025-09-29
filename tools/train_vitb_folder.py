@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional path to a teacher checkpoint to warm-start the student.",
     )
+
     parser.add_argument(
         "--pretrained-weights",
         default="",
@@ -98,6 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Weights are matched against the student backbone automatically."
         ),
     )
+=======
+# <<<<<<< codex/locate-data-folder-and-scripts-for-self-supervision-vvt0je
+#     parser.add_argument(
+#         "--pretrained-weights",
+#         default="",
+#         help=(
+#             "Optional path to a pretrained ViT checkpoint. "
+#             "Weights are matched against the student backbone automatically."
+#         ),
+#     )
+# =======
+
 
     parser.set_defaults(
         config_file=str(DEFAULT_CONFIG),
@@ -134,6 +147,7 @@ def _prepare_opts(args: argparse.Namespace) -> None:
     if args.resume_teacher:
         teacher_path = Path(args.resume_teacher).expanduser().resolve()
         args.opts.append(f"student.resume_from_teacher_chkpt={teacher_path}")
+
     if args.pretrained_weights:
         weights_spec = args.pretrained_weights.strip()
         if weights_spec:
@@ -145,6 +159,13 @@ def _prepare_opts(args: argparse.Namespace) -> None:
                     "Using non-local pretrained weights spec: %s", weights_spec
                 )
             args.opts.append(f"student.pretrained_weights={weights_spec}")
+
+    if args.pretrained_weights:
+        weights_path = Path(args.pretrained_weights).expanduser().resolve()
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Pretrained weights not found: {weights_path}")
+        args.opts.append(f"student.pretrained_weights={weights_path}")
+
 
 
 def main() -> None:
