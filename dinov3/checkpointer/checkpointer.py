@@ -384,9 +384,11 @@ def init_fsdp_model_from_checkpoint(
                 elif "src_rank" in distribute_params:
                     kwargs["src_rank"] = None
                 distributed_state_dict[key] = distribute_tensor_fn(tensor, world_mesh, **kwargs)
+
                 distributed_state_dict[key] = torch.distributed.tensor.distribute_tensor(
                     tensor, world_mesh, src_data_rank=None
                 )
+
 
         filtered_state_dict = distributed_state_dict
 
