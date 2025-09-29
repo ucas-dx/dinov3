@@ -164,6 +164,7 @@ class ConvNeXt(nn.Module):
         self.stages = nn.ModuleList()  # 4 feature resolution stages, each consisting of multiple residual blocks
         dp_rates = [x for x in np.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
+        collected_blocks = []
         for i in range(4):
             stage = nn.Sequential(
                 *[
@@ -172,6 +173,7 @@ class ConvNeXt(nn.Module):
                 ]
             )
             self.stages.append(stage)
+            collected_blocks.extend(stage)
             cur += depths[i]
 
         self.norm = nn.LayerNorm(dims[-1], eps=1e-6)  # final norm layer
@@ -181,7 +183,8 @@ class ConvNeXt(nn.Module):
         self.head = nn.Identity()  # remove classification head
         self.embed_dim = dims[-1]
         self.embed_dims = dims  # per layer dimensions
-        self.n_blocks = len(self.downsample_layers)  # 4
+        self.blocks = nn.ModuleList(collected_blocks)
+        self.n_blocks = len(self.blocks)
         self.chunked_blocks = False
         self.n_storage_tokens = 0  # no registers
 

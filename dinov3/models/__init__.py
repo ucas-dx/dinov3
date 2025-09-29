@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from dinov3.layers.fp8_linear import convert_linears_to_fp8
 
+from . import convnext as convnexts
 from . import vision_transformer as vits
 
 logger = logging.getLogger("dinov3")
@@ -61,6 +62,25 @@ def build_model(args, only_teacher=False, img_size=224, device=None):
             return teacher, teacher.embed_dim
         student = vits.__dict__[args.arch](
             **vit_kwargs,
+            drop_path_rate=args.drop_path_rate,
+        )
+        embed_dim = student.embed_dim
+    elif args.arch.startswith("convnext"):
+        convnext_ctor = convnexts.get_convnext_arch(args.arch)
+        common_kwargs = dict(
+            in_chans=args.in_chans,
+            layer_scale_init_value=getattr(args, "layerscale", 1e-6),
+            patch_size=getattr(args, "patch_size", None),
+        )
+        teacher = convnext_ctor(
+            **common_kwargs,
+            drop_path_rate=0.0,
+        )
+        teacher = init_fp8(teacher, args)
+        if only_teacher:
+            return teacher, teacher.embed_dim
+        student = convnext_ctor(
+            **common_kwargs,
             drop_path_rate=args.drop_path_rate,
         )
         embed_dim = student.embed_dim

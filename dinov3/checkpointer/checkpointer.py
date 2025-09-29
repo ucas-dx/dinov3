@@ -24,6 +24,7 @@ Distributed checkpointer docs:
 - https://pytorch.org/docs/stable/distributed.checkpoint.html
 """
 
+import inspect
 import logging
 import shutil
 import subprocess
@@ -272,36 +273,122 @@ def init_fsdp_model_from_checkpoint(
     keys_not_sharded: List[str] | None = None,
     process_group: dist.ProcessGroup = None,
 ):
-    if not Path(checkpoint_path).is_dir():  # PyTorch standard checkpoint
-        logger.info(f"Loading pretrained weights from {checkpoint_path}")
-        chkpt = torch.load(checkpoint_path, map_location="cpu")["teacher"]
+    skip_load_keys = skip_load_keys or []
+    keys_not_sharded = keys_not_sharded or []
+
+    if Path(checkpoint_path).is_dir():  # DCP checkpoint
+        load_checkpoint(ckpt_dir=checkpoint_path, model=model, process_group=process_group)
+        return
+
+    logger.info(f"Loading pretrained weights from {checkpoint_path}")
+
+    checkpoint_obj = torch.load(checkpoint_path, map_location="cpu")
+
+    def _unwrap_state_dict(obj):
+        if isinstance(obj, dict):
+            tensor_like_values = all(torch.is_tensor(v) for v in obj.values())
+            if tensor_like_values:
+                return obj
+            for key in (
+                "teacher",
+                "student",
+                "model",
+                "state_dict",
+                "backbone",
+                "weights",
+                "model_state_dict",
+            ):
+                if key in obj:
+                    try:
+                        return _unwrap_state_dict(obj[key])
+                    except (TypeError, ValueError):
+                        continue
+        raise ValueError("Unable to extract a state_dict from checkpoint")
+
+    def _strip_known_prefix(key: str) -> str:
+        for prefix in ("module.", "model.", "state_dict."):
+            if key.startswith(prefix):
+                return key[len(prefix) :]
+        return key
+
+    def _remap_keys(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        target_keys = set(model.state_dict().keys())
+
+        def candidate_keys(base_key: str) -> List[str]:
+            prefixes = (
+                "",
+                "backbone.",
+                "student.",
+                "student.backbone.",
+                "module.",
+                "module.backbone.",
+                "model.",
+                "model.backbone.",
+            )
+            return [prefix + base_key for prefix in prefixes]
+
+        remapped: dict[str, torch.Tensor] = {}
+        for key, tensor in state_dict.items():
+            base_key = _strip_known_prefix(key)
+            for candidate in candidate_keys(base_key):
+                if candidate in target_keys:
+                    remapped[candidate] = tensor
+                    break
+            else:
+                remapped[key] = tensor
+        return remapped
+
+    try:
+        raw_state_dict = _unwrap_state_dict(checkpoint_obj)
+    except ValueError:
+        raw_state_dict = checkpoint_obj
+
+    state_dict = _remap_keys(raw_state_dict)
+
+    filtered_state_dict = {
+        key: tensor
+        for key, tensor in state_dict.items()
+        if not any(skip_key in key for skip_key in skip_load_keys)
+    }
+
+    world_mesh = None
+    if torch.cuda.is_available():
         from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
-        if process_group is None:
+        if process_group is None and dist.is_available() and dist.is_initialized():
             world_mesh = init_device_mesh(
                 "cuda",
                 mesh_shape=(dist.get_world_size(),),
                 mesh_dim_names=("dp",),
             )
-        else:
+        elif process_group is not None:
             world_mesh = DeviceMesh.from_group(process_group, "cuda")
-        chkpt = {
-            key: (
-                torch.distributed.tensor.distribute_tensor(tensor, world_mesh, src_data_rank=None)
-                if not any(key_not_sharded in key for key_not_sharded in keys_not_sharded)
-                else tensor
-            )
-            for key, tensor in chkpt.items()
-        }
-        model.load_state_dict(
-            {
-                key: tensor
-                for key, tensor in chkpt.items()
-                if not any(skip_load_key in key for skip_load_key in skip_load_keys)
-            }
-        )
-    else:  # DCP checkpoint
-        load_checkpoint(ckpt_dir=checkpoint_path, model=model, process_group=process_group)
+
+    if world_mesh is not None:
+        distribute_tensor_fn = torch.distributed.tensor.distribute_tensor
+        try:
+            distribute_params = inspect.signature(distribute_tensor_fn).parameters
+        except (TypeError, ValueError):
+            distribute_params = {}
+        distributed_state_dict = {}
+        for key, tensor in filtered_state_dict.items():
+            if any(not_sharded_key in key for not_sharded_key in keys_not_sharded):
+                distributed_state_dict[key] = tensor
+            else:
+                kwargs = {}
+                if "src_data_rank" in distribute_params:
+                    kwargs["src_data_rank"] = None
+                elif "src_rank" in distribute_params:
+                    kwargs["src_rank"] = None
+                distributed_state_dict[key] = distribute_tensor_fn(tensor, world_mesh, **kwargs)
+        filtered_state_dict = distributed_state_dict
+
+    load_msg = model.load_state_dict(filtered_state_dict, strict=False)
+
+    if getattr(load_msg, "missing_keys", None):
+        logger.info("Missing keys when loading %s: %s", checkpoint_path, load_msg.missing_keys)
+    if getattr(load_msg, "unexpected_keys", None):
+        logger.info("Unexpected keys when loading %s: %s", checkpoint_path, load_msg.unexpected_keys)
 
 
 # Initialize a standard non distributed PyTorch model from PyTorch standard checkpoint for evals
