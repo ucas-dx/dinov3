@@ -10,7 +10,7 @@ from typing import Any, Callable, List, Optional, TypeVar
 import torch
 from torch.utils.data import Sampler
 
-from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k
+from .datasets import ADE20K, CocoCaptions, ImageNet, ImageNet22k, UnlabeledImageFolder
 from .samplers import EpochSampler, InfiniteSampler, ShardedInfiniteSampler
 
 logger = logging.getLogger("dinov3")
@@ -51,7 +51,7 @@ def _parse_dataset_str(dataset_str: str):
 
     for token in tokens[1:]:
         key, value = token.split("=")
-        assert key in ("root", "extra", "split")
+        assert key in ("root", "extra", "split", "recursive", "extensions")
         kwargs[key] = value
 
     if name == "ImageNet":
@@ -68,6 +68,12 @@ def _parse_dataset_str(dataset_str: str):
         class_ = CocoCaptions
         if "split" in kwargs:
             kwargs["split"] = CocoCaptions.Split[kwargs["split"]]
+    elif name == "UnlabeledImageFolder":
+        class_ = UnlabeledImageFolder
+        if "recursive" in kwargs:
+            kwargs["recursive"] = kwargs["recursive"].lower() == "true"
+        if "extensions" in kwargs:
+            kwargs["extensions"] = tuple(filter(None, kwargs["extensions"].lower().split("|")))
     else:
         raise ValueError(f'Unsupported dataset "{name}"')
 

@@ -498,22 +498,29 @@ def do_train(cfg, model, resume=False):
                 )
 
         # Reduce total_loss to check for NaNs, reduce metrics for logging
-        total_loss_all_ranks = total_loss.new_empty(distributed.get_subgroup_size())
-        torch.distributed.all_gather_into_tensor(
-            total_loss_all_ranks,
-            total_loss.detach(),
-            group=distributed.get_process_subgroup(),
-        )
-        total_loss = total_loss_all_ranks.mean()
-        metrics_values = torch.stack(
-            [torch.as_tensor(v, dtype=torch.float32, device=total_loss.device).detach() for v in metrics_dict.values()]
-        )
-        torch.distributed.all_reduce(
-            metrics_values,
-            op=torch.distributed.ReduceOp.AVG,
-            group=distributed.get_process_subgroup(),
-        )
-        metrics_dict = dict(zip(metrics_dict.keys(), metrics_values))
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            total_loss_all_ranks = total_loss.new_empty(distributed.get_subgroup_size())
+            torch.distributed.all_gather_into_tensor(
+                total_loss_all_ranks,
+                total_loss.detach(),
+                group=distributed.get_process_subgroup(),
+            )
+            total_loss = total_loss_all_ranks.mean()
+            metrics_values = torch.stack(
+                [torch.as_tensor(v, dtype=torch.float32, device=total_loss.device).detach() for v in metrics_dict.values()]
+            )
+            torch.distributed.all_reduce(
+                metrics_values,
+                op=torch.distributed.ReduceOp.AVG,
+                group=distributed.get_process_subgroup(),
+            )
+            metrics_dict = dict(zip(metrics_dict.keys(), metrics_values))
+        else:
+            total_loss_all_ranks = total_loss.detach().unsqueeze(0)
+            metrics_dict = {
+                key: torch.as_tensor(value, dtype=torch.float32, device=total_loss.device).detach()
+                for key, value in metrics_dict.items()
+            }
         if total_loss_all_ranks.isnan().any():
             consecutive_nan_count += 1
             which_ranks = total_loss_all_ranks.isnan().nonzero().flatten().tolist()
