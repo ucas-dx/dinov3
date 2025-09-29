@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
+
 """Utility script to pretrain DINOv3 backbones on an unlabeled image folder."""
+
+"""Utility script to pretrain ViT-B on an unlabeled image folder using DINOv3."""
+
 
 from __future__ import annotations
 
@@ -23,6 +27,7 @@ from dinov3.train.train import (
 
 LOGGER = logging.getLogger("dinov3")
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "dinov3" / "configs" / "train" / "multidist_tests" / "vitb_p16.yaml"
+
 DEFAULT_OUTPUT_DIRS = {
     "vit_base": Path("./outputs/vitb-folder").resolve(),
     "convnext_small": Path("./outputs/convnexts-folder").resolve(),
@@ -30,20 +35,29 @@ DEFAULT_OUTPUT_DIRS = {
 DEFAULT_OUTPUT_DIR = DEFAULT_OUTPUT_DIRS["vit_base"]
 CONVNEXT_SMALL_DEFAULT_WEIGHTS = "dinov3_convnext_small_pretrain_lvd1689m-296db49d.pth"
 
+DEFAULT_OUTPUT_DIR = Path("./outputs/vitb-folder").resolve()
+
+
 
 def build_parser() -> argparse.ArgumentParser:
     base_parser = train_module.get_args_parser(add_help=False)
     parser = argparse.ArgumentParser(
+
         description="Self-supervised DINOv3 training on a directory of unlabeled images.",
+
+        description="Self-supervised ViT-B training on a directory of unlabeled images.",
+
         parents=[base_parser],
         add_help=True,
     )
     parser.add_argument(
+
         "--arch",
         default="vit_base",
         help="Backbone architecture to train (e.g. vit_base, convnext_small).",
     )
-    parser.add_argument(
+
+
         "--images-path",
         default=str(Path("./data/unlabeled_images")),
         help="Path to the folder that contains training images.",
@@ -100,6 +114,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional path to a teacher checkpoint to warm-start the student.",
     )
+
     parser.add_argument(
         "--pretrained-weights",
         default="",
@@ -108,6 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Weights are matched against the student backbone automatically."
         ),
     )
+
+
+    parser.add_argument(
+        "--pretrained-weights",
+        default="",
+        help=(
+            "Optional path to a pretrained ViT checkpoint. "
+            "Weights are matched against the student backbone automatically."
+        ),
+    )
+
+
 
     parser.set_defaults(
         config_file=str(DEFAULT_CONFIG),
@@ -132,7 +159,11 @@ def _build_dataset_option(args: argparse.Namespace) -> str:
 def _prepare_opts(args: argparse.Namespace) -> None:
     args.opts = list(args.opts or [])
     args.opts.append(f"train.dataset_path={_build_dataset_option(args)}")
+
     args.opts.append(f"student.arch={args.arch}")
+
+    args.opts.append("student.arch=vit_base")
+
     args.opts.append(f"train.batch_size_per_gpu={args.batch_size}")
     args.opts.append(f"train.num_workers={args.num_workers}")
     args.opts.append(f"optim.epochs={args.epochs}")
@@ -144,6 +175,7 @@ def _prepare_opts(args: argparse.Namespace) -> None:
     if args.resume_teacher:
         teacher_path = Path(args.resume_teacher).expanduser().resolve()
         args.opts.append(f"student.resume_from_teacher_chkpt={teacher_path}")
+
     weights_spec = args.pretrained_weights.strip()
     if not weights_spec and args.arch == "convnext_small":
         candidate_locations = [
@@ -172,6 +204,26 @@ def _prepare_opts(args: argparse.Namespace) -> None:
         args.opts.append(f"student.pretrained_weights={weights_spec}")
 
 
+    if args.pretrained_weights:
+        weights_spec = args.pretrained_weights.strip()
+        if weights_spec:
+            candidate_path = Path(weights_spec).expanduser()
+            if candidate_path.exists():
+                weights_spec = str(candidate_path.resolve())
+            else:
+                LOGGER.info(
+                    "Using non-local pretrained weights spec: %s", weights_spec
+                )
+            args.opts.append(f"student.pretrained_weights={weights_spec}")
+
+    if args.pretrained_weights:
+        weights_path = Path(args.pretrained_weights).expanduser().resolve()
+        if not weights_path.exists():
+            raise FileNotFoundError(f"Pretrained weights not found: {weights_path}")
+        args.opts.append(f"student.pretrained_weights={weights_path}")
+
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -179,10 +231,12 @@ def main() -> None:
     if args.multi_distillation:
         raise RuntimeError("This helper script does not support multi-distillation runs.")
 
+
     if args.output_dir == str(DEFAULT_OUTPUT_DIR):
         arch_default = DEFAULT_OUTPUT_DIRS.get(args.arch)
         if arch_default is not None:
             args.output_dir = str(arch_default)
+
 
     _prepare_opts(args)
 
