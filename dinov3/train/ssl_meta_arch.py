@@ -45,11 +45,23 @@ class SSLMetaArch(nn.Module):
 
         self.cfg = cfg
 
+        if cfg.MODEL.DEVICE.startswith("cuda"):
+            if torch.cuda.is_available():
+                device = torch.device(cfg.MODEL.DEVICE)
+            else:
+                logger.warning("CUDA device requested but not available; falling back to CPU execution")
+                device = torch.device("cpu")
+        else:
+            device = torch.device(cfg.MODEL.DEVICE)
+        self._device = device
+        self._non_blocking_transfer = device.type == "cuda"
+
         student_model_dict = dict()
         teacher_model_dict = dict()
         gram_model_dict = dict()
 
         student_backbone, teacher_backbone, embed_dim = build_model_from_cfg(cfg)
+        self._apply_student_freezing(student_backbone)
         torch.cuda.empty_cache()
         gc.collect()
         gram_backbone, _ = build_model_from_cfg(cfg, only_teacher=True)
@@ -260,6 +272,43 @@ class SSLMetaArch(nn.Module):
                 f"OPTIONS -- global crops GRAM teacher resize antialias: {cfg.gram.global_teacher_resize_antialias}"
             )
 
+    def _apply_student_freezing(self, backbone: nn.Module) -> None:
+        freeze_blocks = int(getattr(self.cfg.student, "freeze_blocks", 0) or 0)
+        if freeze_blocks > 0:
+            blocks = getattr(backbone, "blocks", None)
+            if blocks is None:
+                raise AttributeError(
+                    "Student backbone does not expose `blocks`; cannot freeze transformer layers."
+                )
+            total_blocks = len(blocks)
+            if freeze_blocks > total_blocks:
+                logger.warning(
+                    "Requested freezing %d blocks but the backbone only has %d; clamping to available blocks.",
+                    freeze_blocks,
+                    total_blocks,
+                )
+                freeze_blocks = total_blocks
+            for block in blocks[:freeze_blocks]:
+                block.requires_grad_(False)
+            logger.info("Froze the first %d transformer blocks of the student backbone", freeze_blocks)
+        if getattr(self.cfg.student, "freeze_patch_embed", False):
+            patch_embed = getattr(backbone, "patch_embed", None)
+            if patch_embed is None:
+                raise AttributeError(
+                    "Student backbone does not expose `patch_embed`; cannot freeze patch embedding parameters."
+                )
+            patch_embed.requires_grad_(False)
+            cls_token = getattr(backbone, "cls_token", None)
+            if isinstance(cls_token, nn.Parameter):
+                cls_token.requires_grad = False
+            pos_embed = getattr(backbone, "pos_embed", None)
+            if isinstance(pos_embed, nn.Parameter):
+                pos_embed.requires_grad = False
+            rope_embed = getattr(backbone, "rope_embed", None)
+            if rope_embed is not None:
+                rope_embed.requires_grad_(False)
+            logger.info("Froze the patch embedding parameters of the student backbone")
+
     def _setup_distillation(self):
         logger.info(f"Performing distillation from {self.cfg.distillation.full_cfg_path}")
 
@@ -361,18 +410,23 @@ class SSLMetaArch(nn.Module):
         metrics_dict["local_batch_size"] = B
         metrics_dict["global_batch_size"] = data["global_batch_size"]
 
-        global_crops = data["collated_global_crops"].cuda(non_blocking=True)
-        local_crops = data["collated_local_crops"].cuda(non_blocking=True)
-        masks = data["collated_masks"].cuda(non_blocking=True)
-        mask_indices_list = data["mask_indices_list"].cuda(non_blocking=True)
-        masks_weight = data["masks_weight"].cuda(non_blocking=True)
-        n_masked_patches_tensor = data["n_masked_patches"].cuda(non_blocking=True)
+        def _to_device(tensor):
+            if isinstance(tensor, Tensor):
+                return tensor.to(self._device, non_blocking=self._non_blocking_transfer)
+            return tensor
+
+        global_crops = _to_device(data["collated_global_crops"])
+        local_crops = _to_device(data["collated_local_crops"])
+        masks = _to_device(data["collated_masks"])
+        mask_indices_list = _to_device(data["mask_indices_list"])
+        masks_weight = _to_device(data["masks_weight"])
+        n_masked_patches_tensor = _to_device(data["n_masked_patches"])
 
         if self.has_gram_teacher:
             assert "collated_gram_teacher_crops" in data, (
                 "no gram teacher crops in the data, have you set cfg.crops.gram_teacher_crops_size?"
             )
-            gram_teacher_crops = data["collated_gram_teacher_crops"].cuda(non_blocking=True)
+            gram_teacher_crops = _to_device(data["collated_gram_teacher_crops"])
         else:
             gram_teacher_crops = None
 
